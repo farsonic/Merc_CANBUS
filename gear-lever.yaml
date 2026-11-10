@@ -1,0 +1,253 @@
+# ESPHome: CAN gear lever -> ESP32-S via MCP2515 + TJA1050 SPI module (8 MHz crystal)
+#
+# Web GUI: http://gear-lever.local  (or the IP from your router)
+#   - "Last CAN frame"       : most recent frame whose payload changed
+#   - "CAN frame table"      : one entry per CAN ID with its latest payload
+#   - "Changed IDs (last 2s)": which IDs changed while you moved the lever  <- the useful one
+#   - "Logs" panel at the bottom of the page shows the same stream as the serial log
+#
+# Fallback: if WiFi fails, the ESP opens an access point "gear-lever" (password below)
+# and the GUI is at http://192.168.4.1
+
+substitutions:
+  name: gear-lever
+  spi_sck_pin: GPIO18      # module SCK
+  spi_mosi_pin: GPIO23     # module SI
+  spi_miso_pin: GPIO19     # module SO
+  can_cs_pin: GPIO5        # module CS
+  reverse_in_pin: GPIO27   # optional: lever pin 10 (grey/yellow) via 27k/10k divider
+  can_bitrate: 500KBPS     # try 500KBPS first, then 125KBPS, 250KBPS, 100KBPS, 83K3BPS
+
+esphome:
+  name: ${name}
+  friendly_name: Gear Lever
+  includes:
+    - decode_gear.h
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  baud_rate: 115200
+  logs:
+    canbus: WARN           # the canbus component logs every frame at DEBUG; we log changes ourselves
+    mcp2515: WARN
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "gear-lever"
+    password: "gearlever123"
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+  log: true                # show the log stream in the browser
+
+globals:
+  - id: last_frames
+    type: std::map<uint32_t, std::vector<uint8_t>>
+  - id: change_time
+    type: std::map<uint32_t, uint32_t>
+  - id: frame_count
+    type: uint32_t
+    initial_value: '0'
+  - id: change_count
+    type: uint32_t
+    initial_value: '0'
+  - id: last_frame_str
+    type: std::string
+    initial_value: '"none yet"'
+  - id: tip_up_count
+    type: uint32_t
+    initial_value: '0'
+  - id: tip_down_count
+    type: uint32_t
+    initial_value: '0'
+
+spi:
+  clk_pin: ${spi_sck_pin}
+  mosi_pin: ${spi_mosi_pin}
+  miso_pin: ${spi_miso_pin}
+
+canbus:
+  - platform: mcp2515
+    id: can0
+    cs_pin: ${can_cs_pin}
+    clock: 8MHZ
+    mode: NORMAL           # we must ACK the lever's frames on a 2-node bus
+    can_id: 0x7FF
+    bit_rate: ${can_bitrate}
+    on_frame:
+      - can_id: 0
+        can_id_mask: 0     # accept every standard-ID frame
+        use_extended_id: false
+        then:
+          - lambda: |-
+              id(frame_count)++;
+              auto &prev = id(last_frames)[can_id];
+              if (prev == x) return;                      // unchanged payload -> ignore
+              bool first = prev.empty();
+              prev = x;
+              id(change_count)++;
+              if (!first) id(change_time)[can_id] = millis();
+              char buf[48];
+              int n = snprintf(buf, sizeof(buf), "0x%03X:", can_id);
+              for (size_t i = 0; i < x.size() && i < 8; i++)
+                n += snprintf(buf + n, sizeof(buf) - n, " %02X", x[i]);
+              id(last_frame_str) = buf;
+              ESP_LOGI("can", "%s", buf);
+              std::string g = decode_gear(can_id, x);
+              if (!g.empty() && g != id(gear).state) id(gear).publish_state(g);
+              bool up = lever_tip_up(can_id, x), down = lever_tip_down(can_id, x);
+              if (up)   { id(tip_up_count)++;   ESP_LOGI("lever", "TIP +"); }
+              if (down) { id(tip_down_count)++; ESP_LOGI("lever", "TIP -"); }
+              id(tip_up).publish_state(up);
+              id(tip_down).publish_state(down);
+              id(parked_flag).publish_state(lever_parked_flag(can_id, x));
+              bool w = lever_winter_program(can_id, x);
+              if (w != id(winter_program).state) ESP_LOGI("lever", "Program: %s", w ? "W" : "S");
+              id(winter_program).publish_state(w);
+      - can_id: 0
+        can_id_mask: 0
+        use_extended_id: true
+        then:
+          - lambda: |-
+              ESP_LOGI("can", "EXT 0x%08X len %u", can_id, (unsigned) x.size());
+
+text_sensor:
+  - platform: template
+    id: gear
+    name: "Gear lever position"
+    update_interval: never
+    icon: mdi:car-shift-pattern
+
+  - platform: template
+    name: "Last CAN frame"
+    icon: mdi:code-brackets
+    update_interval: 500ms
+    lambda: return id(last_frame_str);
+
+  - platform: template
+    name: "CAN frame table"
+    icon: mdi:table
+    update_interval: 1s
+    lambda: |-
+      std::string out;
+      for (auto &kv : id(last_frames)) {
+        char buf[48];
+        int n = snprintf(buf, sizeof(buf), "%03X:", kv.first);
+        for (uint8_t b : kv.second) n += snprintf(buf + n, sizeof(buf) - n, "%02X", b);
+        if (!out.empty()) out += " | ";
+        out += buf;
+        if (out.size() > 220) { out += " ..."; break; }   // HA/web limit is 255 chars
+      }
+      return out.empty() ? std::string("no frames") : out;
+
+  - platform: template
+    name: "Changed IDs (last 2s)"
+    icon: mdi:swap-horizontal
+    update_interval: 500ms
+    lambda: |-
+      std::string out;
+      uint32_t now = millis();
+      for (auto &kv : id(change_time)) {
+        if (now - kv.second < 2000) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "%03X ", kv.first);
+          out += buf;
+        }
+      }
+      return out.empty() ? std::string("-") : out;
+
+sensor:
+  - platform: template
+    name: "Tip + count"
+    icon: mdi:plus-box
+    lambda: return id(tip_up_count);
+    update_interval: 500ms
+    accuracy_decimals: 0
+  - platform: template
+    name: "Tip - count"
+    icon: mdi:minus-box
+    lambda: return id(tip_down_count);
+    update_interval: 500ms
+    accuracy_decimals: 0
+  - platform: template
+    name: "CAN frames received"
+    lambda: return id(frame_count);
+    update_interval: 2s
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    name: "CAN payload changes"
+    lambda: return id(change_count);
+    update_interval: 2s
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: tip_up
+    name: "Tip +"
+    icon: mdi:plus-box
+    filters:
+      - delayed_off: 750ms   # hold the indicator so a quick tap is visible
+  - platform: template
+    id: tip_down
+    name: "Tip -"
+    icon: mdi:minus-box
+    filters:
+      - delayed_off: 750ms
+  - platform: template
+    id: winter_program
+    name: "Winter program (W)"
+    icon: mdi:snowflake
+  - platform: template
+    id: parked_flag
+    name: "Parked flag (bit 4)"
+    icon: mdi:car-brake-parking
+  - platform: gpio
+    name: "Reverse (hardwired)"
+    pin:
+      number: ${reverse_in_pin}
+      mode: INPUT_PULLDOWN
+    filters:
+      - delayed_on_off: 30ms
+
+button:
+  - platform: template
+    name: "Clear frame table"
+    icon: mdi:broom
+    on_press:
+      - lambda: |-
+          id(last_frames).clear();
+          id(change_time).clear();
+          id(frame_count) = 0;
+          id(change_count) = 0;
+          id(last_frame_str) = "cleared";
+  - platform: template
+    name: "Send test frame"
+    icon: mdi:send
+    on_press:
+      - canbus.send:
+          canbus_id: can0
+          can_id: 0x200       # placeholder until you know what the lever listens for
+          data: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+  - platform: restart
+    name: "Restart"
