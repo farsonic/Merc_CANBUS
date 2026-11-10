@@ -24,6 +24,10 @@ Status: working on the bench. Lever decoded completely from live captures.
 
 ### 1.2 Lever connector pinout
 
+![Lever pinout table from the manual](images/lever-pinout-table.jpg)
+
+![Connector face, annotated: G = ground (4), H = CAN H (6), L = CAN L (7)](images/lever-connector-pinout-annotated.jpg)
+
 Numbering looking into the lever's socket: 8-pin block has 4 top-left, 8 top-right,
 1 bottom-left, 5 bottom-right (columns 1-2-3-4 upward on the left, 5-6-7-8 upward on the
 right). The 2-pin block is 10 (top) and 9 (bottom).
@@ -41,7 +45,13 @@ right). The 2-pin block is 10 (top) and 9 (bottom).
 | 9 | Black/blue: +12 V in for reverse lamp | +12 V, optional |
 | 10 | Grey/yellow: +12 V out when in R | ESP32 GPIO27 via 27k/10k divider, optional |
 
+![Lever connector wired: red +12 V, black GND, yellow/green CAN H/L](images/lever-connector-wired.jpg)
+
 ### 1.3 CAN module to ESP32-S
+
+![MCP2515 module wired to the lever and the ESP32](images/mcp2515-module-wired.jpg)
+
+![NodeMCU ESP-32S with the SPI jumpers on GPIO5/18/19/23 and 5V/GND](images/esp32s-wiring.jpg)
 
 | Module J4 | ESP32-S | Note |
 |---|---|---|
