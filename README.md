@@ -7,6 +7,20 @@ Home Assistant via ESPHome.
 
 Status: working on the bench. Lever decoded completely from live captures.
 
+## Quick start
+
+```bash
+git clone https://github.com/farsonic/Merc_CANBUS.git
+cd Merc_CANBUS
+pip install esphome              # or: brew install esphome
+cp secrets.yaml.example secrets.yaml   # edit with your WiFi credentials
+make config                      # validate (seconds)
+make run                         # build and flash over USB, then open http://gear-lever.local
+```
+
+Wire the hardware as in section 1 first. `CLAUDE.md` has build notes and gotchas for
+anyone (or any AI assistant) changing the code.
+
 ---
 
 ## 1. Hardware
